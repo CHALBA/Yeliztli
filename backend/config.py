@@ -4,6 +4,7 @@ Layered: defaults -> ~/.yeliztli/config.toml ([yeliztli] table) -> environment
 variables (YELIZTLI_*).
 """
 
+import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -43,6 +44,19 @@ DATA_DIR_POINTER_NAME = ".data_dir_pointer"
 def data_dir_pointer_path() -> Path:
     """Absolute path of the data_dir pointer file (under ``DEFAULT_DATA_DIR``)."""
     return DEFAULT_DATA_DIR / DATA_DIR_POINTER_NAME
+
+
+def config_toml_path() -> Path:
+    """The single config.toml location, read by Settings and written by every writer.
+
+    Lives in ``DEFAULT_DATA_DIR`` (the home dir), NOT the effective ``data_dir``:
+    the read source (:class:`_ConfigTomlTableSource`) loads from here, so writers
+    must target the same file or their values never round-trip back into Settings.
+    Keeping it in the home dir (alongside the data_dir pointer) also means user
+    config survives a relocated data volume being unmounted, while the bulk DBs
+    live under the relocated ``data_dir``.
+    """
+    return DEFAULT_DATA_DIR / "config.toml"
 
 
 class _ConfigTomlTableSource(PydanticBaseSettingsSource):
@@ -230,7 +244,7 @@ class Settings(BaseSettings):
             init_settings,
             env_settings,
             _DataDirPointerSource(settings_cls, data_dir_pointer_path()),
-            _ConfigTomlTableSource(settings_cls, DEFAULT_DATA_DIR / "config.toml"),
+            _ConfigTomlTableSource(settings_cls, config_toml_path()),
             dotenv_settings,
         )
 
@@ -312,6 +326,13 @@ def write_config_toml(config_path: Path, content: dict[str, dict[str, object]]) 
     """Write ``content`` to ``config_path`` as escaped TOML (creating parents)."""
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(dump_config_toml(content), encoding="utf-8")
+
+
+# Serializes the read-modify-write of config.toml across every writer (setup
+# credentials, preferences theme, auth settings). Without one shared lock, two
+# concurrent saves each read the file, mutate their own key, and write back —
+# last-writer-wins silently drops the other's key.
+config_write_lock = threading.Lock()
 
 
 def write_data_dir_pointer(data_dir: Path) -> None:

@@ -28,6 +28,8 @@ from backend.auth import (
     verify_password,
 )
 from backend.config import (
+    config_toml_path,
+    config_write_lock,
     get_settings,
     read_config_section,
     write_config_section,
@@ -100,16 +102,20 @@ def _read_config_toml(config_path: Path) -> dict:
 
 def _persist_auth_settings(*, auth_enabled: bool, auth_password_hash: str) -> None:
     """Write auth settings to config.toml and bust the settings cache."""
-    settings = get_settings()
-    config_path = settings.data_dir / "config.toml"
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    # The single config.toml the Settings read source loads (home dir); writing
+    # to a relocated data_dir would never round-trip back. write_config_toml
+    # creates the parent dir as needed.
+    config_path = config_toml_path()
 
-    existing = _read_config_toml(config_path)
-    section = read_config_section(existing)
-    section["auth_enabled"] = auth_enabled
-    section["auth_password_hash"] = auth_password_hash
-    write_config_section(existing, section)
-    write_config_toml(config_path, existing)
+    # Read-modify-write under the shared lock so a concurrent credentials/theme
+    # save can't clobber the auth keys (or vice versa).
+    with config_write_lock:
+        existing = _read_config_toml(config_path)
+        section = read_config_section(existing)
+        section["auth_enabled"] = auth_enabled
+        section["auth_password_hash"] = auth_password_hash
+        write_config_section(existing, section)
+        write_config_toml(config_path, existing)
 
     # Bust the lru_cache so new settings take effect
     get_settings.cache_clear()

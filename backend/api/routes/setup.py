@@ -30,6 +30,8 @@ from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel
 
 from backend.config import (
+    config_toml_path,
+    config_write_lock,
     get_settings,
     read_config_section,
     write_config_section,
@@ -934,23 +936,23 @@ async def save_credentials(body: SaveCredentialsRequest) -> SaveCredentialsRespo
     NCBI API key is optional but raises the rate limit from 3 to 10 req/sec.
     OMIM API key is optional — enables gene-phenotype enrichment beyond MONDO/HPO.
     """
-    settings = get_settings()
-    config_path = settings.data_dir / "config.toml"
+    # The single config.toml the Settings read source loads (home dir); writing
+    # to a relocated data_dir would never round-trip back. write_config_toml
+    # creates the parent dir as needed.
+    config_path = config_toml_path()
 
-    # Ensure data dir exists
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
-
-    # Read existing config and update credentials
-    existing_content = _read_config_toml(config_path)
-    section = read_config_section(existing_content)
-    section["pubmed_email"] = body.pubmed_email
-    # Config key is pubmed_api_key (matching Settings/Entrez naming);
-    # API field is ncbi_api_key for end-user clarity.
-    section["pubmed_api_key"] = body.ncbi_api_key
-    section["omim_api_key"] = body.omim_api_key
-    write_config_section(existing_content, section)
-
-    write_config_toml(config_path, existing_content)
+    # Read existing config and update credentials under the shared lock so a
+    # concurrent theme/auth save can't clobber these keys (or vice versa).
+    with config_write_lock:
+        existing_content = _read_config_toml(config_path)
+        section = read_config_section(existing_content)
+        section["pubmed_email"] = body.pubmed_email
+        # Config key is pubmed_api_key (matching Settings/Entrez naming);
+        # API field is ncbi_api_key for end-user clarity.
+        section["pubmed_api_key"] = body.ncbi_api_key
+        section["omim_api_key"] = body.omim_api_key
+        write_config_section(existing_content, section)
+        write_config_toml(config_path, existing_content)
 
     logger.info(
         "credentials_saved",

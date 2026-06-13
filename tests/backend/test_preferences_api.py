@@ -49,10 +49,10 @@ def prefs_client(tmp_data_dir: Path) -> TestClient:
         patch("backend.main.get_settings", return_value=base_settings),
         patch("backend.db.connection.get_settings", return_value=base_settings),
         patch("backend.api.routes.preferences.get_settings", side_effect=_make_settings),
-        patch(
-            "backend.api.routes.preferences.DEFAULT_DATA_DIR",
-            tmp_data_dir,
-        ),
+        # config.toml lives in DEFAULT_DATA_DIR (where set_theme writes via
+        # config_toml_path and _make_settings reads it back); isolate it to the
+        # temp dir so the test never touches the real home config.
+        patch("backend.config.DEFAULT_DATA_DIR", tmp_data_dir),
         patch("backend.api.routes.databases.get_settings", return_value=base_settings),
     ):
         reset_registry()
