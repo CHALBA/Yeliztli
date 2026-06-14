@@ -607,6 +607,95 @@ def test_restore_relocated_install_writes_config_to_home(tmp_path: Path) -> None
     assert (relocated / "samples" / "sample_000.db").exists()
 
 
+def test_import_backup_is_transactional_on_failure(tmp_path: Path, monkeypatch) -> None:
+    """A mid-restore failure leaves data_dir untouched — no partial samples/config.
+
+    Regression: extraction wrote straight into data_dir, so a failure partway
+    left half the sample DBs behind (and detect-existing/needs_setup could then
+    treat the broken partial install as real).
+    """
+    import backend.api.routes.setup as setup_mod
+
+    home = tmp_path / "home"
+    home.mkdir()
+    data_dir = tmp_path / "store"
+    data_dir.mkdir()
+    settings = Settings(data_dir=data_dir, wal_mode=False)
+    archive = _create_backup_archive(tmp_path, include_config=True, num_samples=2)
+
+    # Fail during the staged-sample upgrade (after extraction, before the move):
+    # the commit must never run, so nothing lands under data_dir or home.
+    def _boom(_path: Path) -> None:
+        raise RuntimeError("simulated upgrade failure")
+
+    monkeypatch.setattr(setup_mod, "_upgrade_restored_sample_db", _boom)
+
+    with _relocated_client(home, settings):
+        reset_registry()
+        from backend.main import create_app
+
+        # raise_server_exceptions=False: surface the failure as a 500 response
+        # (the handler doesn't catch the upgrade error) rather than re-raising.
+        client = TestClient(create_app(), raise_server_exceptions=False)
+        with client as tc, archive.open("rb") as f:
+            resp = tc.post(
+                "/api/setup/import-backup",
+                files={"file": ("backup.tar.gz", f, "application/gzip")},
+            )
+        reset_registry()
+
+    assert resp.status_code != 200  # restore failed
+    samples_dir = data_dir / "samples"
+    assert not samples_dir.exists() or not list(samples_dir.glob("*.db"))
+    assert not (home / "config.toml").exists()  # config not committed either
+    assert not list(data_dir.glob(".import_staging_*"))  # staging cleaned up
+
+
+def test_import_backup_leaves_no_partial_samples_on_commit_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A failure during the samples commit (move) leaves no partial sample set.
+
+    The first-run restore commits the staged samples as a single atomic directory
+    rename, so a failure there moves nothing into data_dir.
+    """
+    import os
+
+    home = tmp_path / "home"
+    home.mkdir()
+    data_dir = tmp_path / "store"
+    data_dir.mkdir()
+    settings = Settings(data_dir=data_dir, wal_mode=False)
+    archive = _create_backup_archive(tmp_path, num_samples=2)  # samples only
+
+    real_replace = os.replace
+
+    def _boom_on_samples(src, dst):
+        # Fail the atomic samples directory rename (dst is data_dir/samples).
+        if str(dst).rstrip("/").endswith("samples"):
+            raise OSError("simulated commit failure")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr("backend.api.routes.setup.os.replace", _boom_on_samples)
+
+    with _relocated_client(home, settings):
+        reset_registry()
+        from backend.main import create_app
+
+        client = TestClient(create_app(), raise_server_exceptions=False)
+        with client as tc, archive.open("rb") as f:
+            resp = tc.post(
+                "/api/setup/import-backup",
+                files={"file": ("backup.tar.gz", f, "application/gzip")},
+            )
+        reset_registry()
+
+    assert resp.status_code != 200
+    samples_dir = data_dir / "samples"
+    assert not samples_dir.exists() or not list(samples_dir.glob("*.db"))
+    assert not list(data_dir.glob(".import_staging_*"))
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # GET /api/setup/detect-existing
 # ═══════════════════════════════════════════════════════════════════════
