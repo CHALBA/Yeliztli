@@ -43,8 +43,6 @@ from backend.annotation.gwas import (
     gwas_matched_rsids,
     iter_gwas_tsv,
     load_gwas_from_iter,
-    load_gwas_into_db,
-    parse_gwas_tsv,
     parse_gwas_tsv_row,
     record_gwas_version,
 )
