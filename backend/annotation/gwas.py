@@ -602,23 +602,6 @@ def iter_gwas_tsv(
                 progress_callback(stats.total_lines)
 
 
-def parse_gwas_tsv(
-    tsv_path: Path,
-    *,
-    progress_callback: Callable[[int], None] | None = None,
-) -> tuple[list[dict], GWASLoadStats]:
-    """Parse a GWAS Catalog TSV file and return all matching rows + stats.
-
-    For small files / testing. For large files, prefer ``iter_gwas_tsv``
-    with ``load_gwas_from_iter`` to keep memory usage low.
-    """
-    rows: list[dict] = []
-    stats = GWASLoadStats()
-    for row, stats in iter_gwas_tsv(tsv_path, progress_callback=progress_callback):
-        rows.append(row)
-    return rows, stats
-
-
 # ── Database loading ──────────────────────────────────────────────────────
 
 
@@ -650,44 +633,7 @@ def _compute_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def load_gwas_into_db(
-    rows: list[dict],
-    engine: sa.Engine,
-    *,
-    stats: GWASLoadStats | None = None,
-    clear_existing: bool = True,
-) -> GWASLoadStats:
-    """Bulk-load parsed GWAS rows into the gwas_associations table.
 
-    Args:
-        rows: List of dicts matching gwas_associations columns.
-        engine: SQLAlchemy engine for reference.db.
-        stats: Optional GWASLoadStats to update.
-        clear_existing: Whether to DELETE all existing rows first.
-
-    Returns:
-        Updated GWASLoadStats.
-    """
-    # Guard: refuse a destructive clear when there is nothing to load — an empty
-    # or malformed parse must never silently wipe the curated gwas_associations
-    # table (mirrors load_cpic_into_db / load_clingen_into_db).
-    if clear_existing and not rows:
-        raise ValueError(
-            "Refusing to clear gwas_associations with 0 rows to load "
-            "(likely an empty or malformed GWAS Catalog source)."
-        )
-
-    if stats is None:
-        stats = GWASLoadStats(associations_loaded=len(rows))
-
-    if clear_existing:
-        with engine.begin() as conn:
-            conn.execute(gwas_associations.delete())
-
-    for i in range(0, len(rows), BATCH_SIZE):
-        batch = rows[i : i + BATCH_SIZE]
-        with engine.begin() as conn:
-            conn.execute(gwas_associations.insert(), batch)
 
     _wal_checkpoint(engine)
 
