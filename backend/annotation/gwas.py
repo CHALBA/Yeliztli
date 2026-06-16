@@ -12,11 +12,12 @@ Usage::
     from backend.annotation.gwas import (
         download_gwas_catalog,
         gwas_matched_rsids,
-        load_gwas_into_db,
+        iter_gwas_tsv,
+        load_gwas_from_iter,
     )
 
     tsv_path = download_gwas_catalog(dest_dir)
-    stats = load_gwas_into_db(tsv_path, engine)
+    stats = load_gwas_from_iter(iter_gwas_tsv(tsv_path), engine)
 """
 
 from __future__ import annotations
@@ -631,18 +632,6 @@ def _compute_sha256(path: Path) -> str:
         for chunk in iter(lambda: f.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
-
-
-
-
-    _wal_checkpoint(engine)
-
-    logger.info(
-        "gwas_loaded",
-        associations=stats.associations_loaded,
-    )
-
-    return stats
 
 
 def load_gwas_from_iter(

@@ -30,6 +30,7 @@ import sqlalchemy as sa
 from backend.annotation.gwas import (
     EFO_MODULES,
     EFO_WHITELIST,
+    GWASLoadStats,
     _extract_risk_allele,
     _extract_rsid,
     _is_odds_ratio,
@@ -617,10 +618,43 @@ class TestParseGwasTsvRow:
 # ═══════════════════════════════════════════════════════════════════════
 
 
+def _materialize_gwas_tsv(
+    tsv_path: Path,
+    **kwargs,
+) -> tuple[list[dict], GWASLoadStats]:
+    """Collect ``iter_gwas_tsv`` into ``(rows, stats)`` for assertions.
+
+    Production streams via ``iter_gwas_tsv`` + ``load_gwas_from_iter``; these
+    tests need the fully-materialised rows to assert on, so this mirrors the
+    removed in-memory ``parse_gwas_tsv`` helper.
+    """
+    rows: list[dict] = []
+    stats = GWASLoadStats()
+    for row, stats in iter_gwas_tsv(tsv_path, **kwargs):
+        rows.append(row)
+    return rows, stats
+
+
+def _load_rows(rows: list[dict], engine: sa.Engine, **kwargs) -> GWASLoadStats:
+    """Load a list of row dicts through the streaming loader.
+
+    Mirrors the removed in-memory ``load_gwas_into_db`` by wrapping the rows as
+    the ``(row, stats)`` pairs that ``load_gwas_from_iter`` consumes.
+    """
+
+    def _pairs():
+        stats = GWASLoadStats()
+        for row in rows:
+            stats.associations_loaded += 1
+            yield row, stats
+
+    return load_gwas_from_iter(_pairs(), engine, **kwargs)
+
+
 class TestIterGwasTsv:
     def test_parse_mini_fixture(self, mini_gwas_tsv: Path):
         """Parse the mini GWAS TSV and verify filtering."""
-        rows, stats = parse_gwas_tsv(mini_gwas_tsv)
+        rows, stats = _materialize_gwas_tsv(mini_gwas_tsv)
         # 5 lines total: 4 match EFO filter, 1 filtered out (hair whorl)
         assert stats.total_lines == 5
         assert stats.associations_loaded == 4
@@ -629,7 +663,7 @@ class TestIterGwasTsv:
 
     def test_parse_gzipped(self, mini_gwas_tsv_gz: Path):
         """Parse the gzipped mini GWAS TSV."""
-        rows, stats = parse_gwas_tsv(mini_gwas_tsv_gz)
+        rows, stats = _materialize_gwas_tsv(mini_gwas_tsv_gz)
         assert stats.associations_loaded == 4
 
     def test_progress_callback(self, mini_gwas_tsv: Path):
@@ -637,12 +671,12 @@ class TestIterGwasTsv:
         # With only 5 lines, won't trigger the 10k modulo callback,
         # but should still complete without error
         callback = MagicMock()
-        rows, stats = parse_gwas_tsv(mini_gwas_tsv, progress_callback=callback)
+        rows, stats = _materialize_gwas_tsv(mini_gwas_tsv, progress_callback=callback)
         assert stats.associations_loaded == 4
 
     def test_specific_rows_parsed(self, mini_gwas_tsv: Path):
         """Verify specific rows are correctly parsed."""
-        rows, stats = parse_gwas_tsv(mini_gwas_tsv)
+        rows, stats = _materialize_gwas_tsv(mini_gwas_tsv)
 
         # Find the T2D row
         t2d = [r for r in rows if "type 2 diabetes" in r["trait"].lower()]
@@ -662,7 +696,7 @@ class TestIterGwasTsv:
 # ═══════════════════════════════════════════════════════════════════════
 
 
-class TestLoadGwasIntoDb:
+class TestLoadGwasRows:
     def test_load_rows(self, reference_engine: sa.Engine):
         """Load parsed GWAS rows into the database."""
         rows = [
@@ -693,7 +727,7 @@ class TestLoadGwasIntoDb:
                 "sample_size": 10128,
             },
         ]
-        stats = load_gwas_into_db(rows, reference_engine)
+        stats = _load_rows(rows, reference_engine)
         assert stats.associations_loaded == 2
 
         with reference_engine.connect() as conn:
@@ -735,8 +769,8 @@ class TestLoadGwasIntoDb:
             }
         ]
 
-        load_gwas_into_db(row1, reference_engine)
-        load_gwas_into_db(row2, reference_engine, clear_existing=True)
+        _load_rows(row1, reference_engine)
+        _load_rows(row2, reference_engine, clear_existing=True)
 
         with reference_engine.connect() as conn:
             count = conn.execute(
@@ -777,26 +811,14 @@ class TestLoadGwasIntoDb:
             }
         ]
 
-        load_gwas_into_db(row1, reference_engine)
-        load_gwas_into_db(row2, reference_engine, clear_existing=False)
+        _load_rows(row1, reference_engine)
+        _load_rows(row2, reference_engine, clear_existing=False)
 
         with reference_engine.connect() as conn:
             count = conn.execute(
                 sa.select(sa.func.count()).select_from(gwas_associations)
             ).scalar()
             assert count == 2
-
-    def test_load_from_tsv(self, reference_engine: sa.Engine, mini_gwas_tsv: Path):
-        """Load directly from TSV file parsing."""
-        rows, stats = parse_gwas_tsv(mini_gwas_tsv)
-        load_gwas_into_db(rows, reference_engine, stats=stats)
-
-        with reference_engine.connect() as conn:
-            count = conn.execute(
-                sa.select(sa.func.count()).select_from(gwas_associations)
-            ).scalar()
-            assert count == 4
-
 
 class TestLoadGwasFromIter:
     def test_stream_load(self, reference_engine: sa.Engine, mini_gwas_tsv: Path):
@@ -1108,17 +1130,6 @@ class TestGwasZeroRowGuard:
     def _count(engine: sa.Engine) -> int:
         with engine.connect() as conn:
             return conn.execute(sa.select(sa.func.count()).select_from(gwas_associations)).scalar()
-
-    def test_load_into_db_refuses_to_wipe(self, seeded_reference_engine: sa.Engine):
-        assert self._count(seeded_reference_engine) == 5
-        with pytest.raises(ValueError, match="0 rows"):
-            load_gwas_into_db([], seeded_reference_engine, clear_existing=True)
-        assert self._count(seeded_reference_engine) == 5  # curated rows preserved
-
-    def test_load_into_db_empty_no_clear_is_noop(self, seeded_reference_engine: sa.Engine):
-        # A non-destructive empty load is a safe no-op (no raise, no wipe).
-        load_gwas_into_db([], seeded_reference_engine, clear_existing=False)
-        assert self._count(seeded_reference_engine) == 5
 
     def test_load_from_iter_refuses_to_wipe(self, seeded_reference_engine: sa.Engine):
         # The streaming loader peeks the first batch before any DELETE.
