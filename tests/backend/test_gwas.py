@@ -820,6 +820,7 @@ class TestLoadGwasRows:
             ).scalar()
             assert count == 2
 
+
 class TestLoadGwasFromIter:
     def test_stream_load(self, reference_engine: sa.Engine, mini_gwas_tsv: Path):
         """Stream-load from TSV iterator."""
